@@ -5,13 +5,11 @@ Extracts YouTube transcripts and cleans them using Gemini Pro.
 """
 
 import argparse
+import json
 import os
 import re
-import subprocess
 import sys
-import tempfile
 import urllib.request
-import json
 from pathlib import Path
 
 from google import genai
@@ -47,38 +45,17 @@ def get_video_info(url: str) -> dict:
 
 
 def extract_transcript(url: str) -> str:
-    """Extract transcript from YouTube video using yt-dlp."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Download subtitles using yt-dlp
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                "--write-auto-sub",
-                "--sub-lang", "en",
-                "--skip-download",
-                "--sub-format", "vtt",
-                "-o", f"{tmpdir}/%(id)s.%(ext)s",
-                url,
-            ],
-            capture_output=True,
-            text=True,
-        )
+    """Extract transcript from YouTube video using youtube_transcript_api."""
+    video_id = extract_video_id(url)
 
-        if result.returncode != 0:
-            raise Exception(f"Failed to extract transcript: {result.stderr}")
-
-        # Find the subtitle file
-        vtt_files = list(Path(tmpdir).glob("*.vtt"))
-        if not vtt_files:
-            raise Exception("No transcript found for this video")
-
-        vtt_file = vtt_files[0]
-
-        # Parse VTT and extract text
-        with open(vtt_file, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        return parse_vtt(content)
+    try:
+        api = YouTubeTranscriptApi()
+        transcript = api.fetch(video_id)
+        # Join all text segments
+        text = ' '.join([snippet.text for snippet in transcript.snippets])
+        return text
+    except Exception as e:
+        raise Exception(f"No transcript found for this video: {e}")
 
 
 def parse_vtt(vtt_content: str) -> str:

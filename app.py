@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Podcast Cleaner Web App
-Flask web interface for transcribing and cleaning YouTube videos.
+Flask web interface for transcribing and cleaning Wistia videos.
 """
 
 import json
@@ -72,10 +72,14 @@ def transcribe():
         }
         return jsonify({"job_id": job_id})
 
-    # Get API key from environment
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
+    # Get API keys from environment
+    google_api_key = os.environ.get("GOOGLE_API_KEY")
+    wistia_api_key = os.environ.get("WISTIA_API_KEY")
+
+    if not google_api_key:
         return jsonify({"error": "GOOGLE_API_KEY not configured"}), 500
+    if not wistia_api_key:
+        return jsonify({"error": "WISTIA_API_KEY not configured"}), 500
 
     # Create job
     job_id = str(uuid.uuid4())
@@ -92,7 +96,7 @@ def transcribe():
             def progress_callback(message):
                 jobs[job_id]["progress"] = message
 
-            result = process_video(url, api_key, progress_callback)
+            result = process_video(url, google_api_key, progress_callback, wistia_api_key=wistia_api_key)
             jobs[job_id]["status"] = "completed"
             jobs[job_id]["result"] = result
             # Cache the result and save to disk
@@ -342,6 +346,7 @@ if __name__ == "__main__":
                     key, value = line.split("=", 1)
                     os.environ[key] = value
 
-    print("Starting Podcast Cleaner Web App...")
+    print("Starting Wistia Transcript Cleaner Web App...")
     print("Open http://127.0.0.1:8080 in your browser")
+    print("Required env vars: GOOGLE_API_KEY, WISTIA_API_KEY")
     app.run(debug=True, host="0.0.0.0", port=8080)

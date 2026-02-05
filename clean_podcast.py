@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Podcast Transcript Cleaner
-Extracts YouTube transcripts and cleans them using Gemini Pro.
+Extracts Wistia video transcripts and cleans them using Gemini Pro.
 """
 
 import argparse
@@ -13,81 +13,122 @@ import urllib.request
 from pathlib import Path
 
 from google import genai
-from youtube_transcript_api import YouTubeTranscriptApi
 
 
-def extract_video_id(url: str) -> str:
-    """Extract video ID from various YouTube URL formats."""
+def extract_media_id(url: str) -> str:
+    """Extract media hashed ID from various Wistia URL formats.
+
+    Wistia URLs include:
+    - https://subdomain.wistia.com/medias/abcde12345
+    - https://subdomain.wi.st/medias/abcde12345
+    - https://fast.wistia.net/embed/iframe/abcde12345
+    - https://fast.wistia.com/embed/medias/abcde12345.m3u8
+    - Raw hashed ID (10 alphanumeric characters)
+    """
     patterns = [
-        r'(?:v=|/v/|youtu\.be/)([a-zA-Z0-9_-]{11})',
-        r'(?:embed/)([a-zA-Z0-9_-]{11})',
-        r'^([a-zA-Z0-9_-]{11})$',
+        r'(?:wistia\.com|wi\.st)/medias/([a-zA-Z0-9]{10})',
+        r'(?:wistia\.net|wistia\.com)/embed/(?:iframe|medias)/([a-zA-Z0-9]{10})',
+        r'^([a-zA-Z0-9]{10})$',
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
-    raise Exception(f"Could not extract video ID from URL: {url}")
+    raise Exception(f"Could not extract Wistia media ID from URL: {url}")
 
 
-def get_video_info(url: str) -> dict:
-    """Extract video title and ID from YouTube URL using oembed API."""
-    video_id = extract_video_id(url)
+# Alias for backwards compatibility
+extract_video_id = extract_media_id
 
-    # Use YouTube's oembed API to get video title (no auth required)
-    oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+
+def get_video_info(url: str, wistia_api_key: str) -> dict:
+    """Extract video title and ID from Wistia URL using Data API."""
+    media_id = extract_media_id(url)
+
+    api_url = f"https://api.wistia.com/v1/medias/{media_id}.json"
+    req = urllib.request.Request(api_url)
+    req.add_header("Authorization", f"Bearer {wistia_api_key}")
+
     try:
-        with urllib.request.urlopen(oembed_url) as response:
+        with urllib.request.urlopen(req) as response:
             data = json.loads(response.read().decode())
-            return {"title": data.get("title", "Unknown Title"), "id": video_id}
+            thumbnail_url = data.get("thumbnail", {}).get("url", "")
+            # Convert to high-res version if available
+            if thumbnail_url:
+                thumbnail_url = re.sub(r'image_crop_resized=\d+x\d+', 'image_crop_resized=1280x720', thumbnail_url)
+            return {
+                "title": data.get("name", "Unknown Title"),
+                "id": media_id,
+                "thumbnail_url": thumbnail_url,
+            }
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise Exception("Invalid Wistia API key")
+        elif e.code == 404:
+            raise Exception(f"Media not found: {media_id}")
+        raise Exception(f"Failed to get video info: {e}")
     except Exception as e:
         raise Exception(f"Failed to get video info: {e}")
 
 
-def extract_transcript(url: str) -> str:
-    """Extract transcript from YouTube video using youtube_transcript_api."""
-    video_id = extract_video_id(url)
-
-    try:
-        api = YouTubeTranscriptApi()
-        transcript = api.fetch(video_id)
-        # Join all text segments
-        text = ' '.join([snippet.text for snippet in transcript.snippets])
-        return text
-    except Exception as e:
-        raise Exception(f"No transcript found for this video: {e}")
-
-
-def parse_vtt(vtt_content: str) -> str:
-    """Parse VTT file and extract clean text."""
-    lines = vtt_content.split("\n")
+def parse_srt(srt_content: str) -> str:
+    """Parse SRT format and extract clean text."""
+    lines = srt_content.split("\n")
     text_lines = []
-    seen_lines = set()
 
     for line in lines:
-        # Skip headers, timestamps, and empty lines
         line = line.strip()
         if not line:
             continue
-        if line.startswith("WEBVTT"):
+        # Skip sequence numbers (just digits)
+        if re.match(r'^\d+$', line):
             continue
-        if line.startswith("Kind:") or line.startswith("Language:"):
+        # Skip timestamp lines (00:00:00,000 --> 00:00:00,000)
+        if re.match(r'^\d{2}:\d{2}:\d{2},\d{3}\s*-->', line):
             continue
-        if re.match(r"^\d{2}:\d{2}", line):  # Timestamp line
-            continue
-        if re.match(r"^[\d\-:.\s>]+$", line):  # Cue identifier
-            continue
-
-        # Remove VTT formatting tags
-        line = re.sub(r"<[^>]+>", "", line)
-        line = re.sub(r"&nbsp;", " ", line)
-
-        # Skip duplicates (auto-subs often repeat)
-        if line not in seen_lines:
-            seen_lines.add(line)
-            text_lines.append(line)
+        # This is actual text content
+        text_lines.append(line)
 
     return " ".join(text_lines)
+
+
+def extract_transcript(url: str, wistia_api_key: str) -> str:
+    """Extract transcript from Wistia video using Captions API."""
+    media_id = extract_media_id(url)
+
+    api_url = f"https://api.wistia.com/v1/medias/{media_id}/captions.json"
+    req = urllib.request.Request(api_url)
+    req.add_header("Authorization", f"Bearer {wistia_api_key}")
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            captions = json.loads(response.read().decode())
+
+            if not captions:
+                raise Exception("No captions/transcript found for this video")
+
+            # Prefer English, otherwise take first available
+            caption = None
+            for c in captions:
+                if c.get("language") == "eng":
+                    caption = c
+                    break
+            if not caption:
+                caption = captions[0]
+
+            srt_text = caption.get("text", "")
+            if not srt_text:
+                raise Exception("Caption text is empty")
+
+            return parse_srt(srt_text)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise Exception("Invalid Wistia API key")
+        elif e.code == 404:
+            raise Exception(f"Media not found or no captions available: {media_id}")
+        raise Exception(f"Failed to get transcript: {e}")
+    except Exception as e:
+        raise Exception(f"No transcript found for this video: {e}")
 
 
 def generate_takeaways(transcript: str, video_title: str, api_key: str) -> str:
@@ -152,37 +193,42 @@ def sanitize_filename(title: str) -> str:
     return safe[:100]  # Limit length
 
 
-def process_video(url: str, api_key: str, progress_callback=None) -> dict:
+def process_video(url: str, google_api_key: str, progress_callback=None, wistia_api_key: str = None) -> dict:
     """
-    Process a YouTube video and return the cleaned transcript with takeaways.
+    Process a Wistia video and return the cleaned transcript with takeaways.
 
     Args:
-        url: YouTube video URL
-        api_key: Google AI API key
+        url: Wistia media page URL
+        google_api_key: Google AI API key for Gemini
         progress_callback: Optional callback function for progress updates
+        wistia_api_key: Wistia API key for accessing video data
 
     Returns:
         dict with keys: title, url, takeaways, transcript, markdown, filename
     """
+    if not wistia_api_key:
+        raise Exception("Wistia API key is required")
+
     def update_progress(message):
         if progress_callback:
             progress_callback(message)
 
     update_progress("Getting video info...")
-    info = get_video_info(url)
+    info = get_video_info(url, wistia_api_key)
 
     update_progress("Extracting transcript...")
-    raw_transcript = extract_transcript(url)
+    raw_transcript = extract_transcript(url, wistia_api_key)
 
     update_progress("Cleaning transcript with Gemini...")
-    transcript = clean_transcript_with_gemini(raw_transcript, info["title"], api_key)
+    transcript = clean_transcript_with_gemini(raw_transcript, info["title"], google_api_key)
 
     update_progress("Generating takeaways...")
-    takeaways = generate_takeaways(transcript, info["title"], api_key)
+    takeaways = generate_takeaways(transcript, info["title"], google_api_key)
 
-    # Build markdown content with thumbnail
-    thumbnail_url = f"https://img.youtube.com/vi/{info['id']}/maxresdefault.jpg"
-    markdown = f"![Thumbnail]({thumbnail_url})\n\n"
+    # Build markdown content with thumbnail from Wistia
+    markdown = ""
+    if info.get("thumbnail_url"):
+        markdown += f"![Thumbnail]({info['thumbnail_url']})\n\n"
     markdown += f"# {info['title']}\n\n"
     markdown += f"Source: {url}\n\n"
     markdown += "## Top Takeaways\n\n"
@@ -205,16 +251,20 @@ def process_video(url: str, api_key: str, progress_callback=None) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract and clean podcast transcripts from YouTube"
+        description="Extract and clean video transcripts from Wistia"
     )
-    parser.add_argument("url", help="YouTube video URL")
+    parser.add_argument("url", help="Wistia media page URL")
     parser.add_argument(
         "-o", "--output",
         help="Output file path (default: auto-generated from video title)",
     )
     parser.add_argument(
-        "--api-key",
+        "--google-api-key",
         help="Google AI API key (or set GOOGLE_API_KEY env var)",
+    )
+    parser.add_argument(
+        "--wistia-api-key",
+        help="Wistia API key (or set WISTIA_API_KEY env var)",
     )
     parser.add_argument(
         "--raw-only",
@@ -224,22 +274,28 @@ def main():
 
     args = parser.parse_args()
 
-    # Get API key
-    api_key = args.api_key or os.environ.get("GOOGLE_API_KEY")
-    if not api_key and not args.raw_only:
-        print("Error: Google AI API key required. Set GOOGLE_API_KEY or use --api-key")
+    # Get API keys
+    google_api_key = args.google_api_key or os.environ.get("GOOGLE_API_KEY")
+    wistia_api_key = args.wistia_api_key or os.environ.get("WISTIA_API_KEY")
+
+    if not wistia_api_key:
+        print("Error: Wistia API key required. Set WISTIA_API_KEY or use --wistia-api-key")
+        sys.exit(1)
+
+    if not google_api_key and not args.raw_only:
+        print("Error: Google AI API key required. Set GOOGLE_API_KEY or use --google-api-key")
         print("Get your API key at: https://aistudio.google.com/apikey")
         sys.exit(1)
 
     try:
         # Get video info
         print("Getting video info...")
-        info = get_video_info(args.url)
+        info = get_video_info(args.url, wistia_api_key)
         print(f"Video: {info['title']}")
 
         # Extract transcript
         print("Extracting transcript...")
-        transcript = extract_transcript(args.url)
+        transcript = extract_transcript(args.url, wistia_api_key)
         print(f"Extracted {len(transcript)} characters")
 
         if args.raw_only:
@@ -250,11 +306,11 @@ def main():
             # Clean with Gemini
             print("Cleaning transcript with Gemini...")
             final_transcript = clean_transcript_with_gemini(
-                transcript, info["title"], api_key
+                transcript, info["title"], google_api_key
             )
             # Generate takeaways
             print("Generating takeaways...")
-            takeaways = generate_takeaways(final_transcript, info["title"], api_key)
+            takeaways = generate_takeaways(final_transcript, info["title"], google_api_key)
             suffix = ""
 
         # Determine output path

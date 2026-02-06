@@ -270,7 +270,7 @@ header p {
 
 /* Description tip */
 form::before {
-    content: "Tired of talks and podcasts being video-only? Mourning the transition to a post-literate society? Use this tool to take any YouTube link and convert it to a readable grammatical transcript, with chapters and top takeaways.";
+    content: "Tired of talks and podcasts being video-only? Mourning the transition to a post-literate society? Use this tool to take any Wistia Media Page link and convert it to a readable grammatical transcript, with chapters and top takeaways.";
     display: block;
     background: linear-gradient(to bottom, #ffffe1 0%, #fff8c5 100%);
     border: 1px solid #cec365;
